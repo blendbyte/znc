@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2004-2025 ZNC, see the NOTICE file for details.
+ * Copyright (C) 2004-2026 ZNC, see the NOTICE file for details.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@
 #ifdef HAVE_LIBSSL
 #include <openssl/ssl.h>
 #include <openssl/bn.h>
+#include <openssl/crypto.h>
 #include <openssl/rsa.h>
 #if (OPENSSL_VERSION_NUMBER < 0x10100000L) || (defined(LIBRESSL_VERSION_NUMBER) && (LIBRESSL_VERSION_NUMBER < 0x20700000L))
 #define X509_getm_notBefore X509_get_notBefore
@@ -268,6 +269,32 @@ CString CUtils::SaltedHash(const CString& sPass, const CString& sSalt) {
     return SaltedArgonHash(sPass, sSalt);
 #else
     return SaltedSHA256Hash(sPass, sSalt);
+#endif
+}
+
+bool CUtils::ConstantTimeEquals(const CString& a, const CString& b) {
+    // Length is leaked, but for the cases this is used in (fixed-size
+    // hex hashes for MD5 / SHA256) the lengths are constant. Plain-text
+    // mode does leak length, but plain-text passwords are deprecated and
+    // discouraged in znc.conf.
+    if (a.length() != b.length()) {
+        return false;
+    }
+#ifdef HAVE_LIBSSL
+    return CRYPTO_memcmp(a.data(), b.data(), a.length()) == 0;
+#else
+    // Best-effort fallback when OpenSSL is unavailable: an optimizer is
+    // in principle allowed to short-circuit this loop, so the volatile
+    // accumulator and pointers are a hint rather than a guarantee.
+    volatile unsigned char acc = 0;
+    const volatile unsigned char* pa =
+        reinterpret_cast<const volatile unsigned char*>(a.data());
+    const volatile unsigned char* pb =
+        reinterpret_cast<const volatile unsigned char*>(b.data());
+    for (size_t i = 0; i < a.length(); ++i) {
+        acc |= static_cast<unsigned char>(pa[i] ^ pb[i]);
+    }
+    return acc == 0;
 #endif
 }
 
@@ -568,10 +595,21 @@ CString CUtils::FormatServerTime(const timeval& tv) {
 
 timeval CUtils::ParseServerTime(const CString& sTime) {
     using namespace std::chrono;
-    system_clock::time_point tp;
-    cctz::parse("%Y-%m-%dT%H:%M:%E*SZ", sTime, cctz::utc_time_zone(), &tp);
     struct timeval tv;
     memset(&tv, 0, sizeof(tv));
+    // Reject obviously out-of-range years up front so we don't hand cctz
+    // an input whose internal `seconds * 1_000_000` conversion would
+    // overflow signed int64 (UB). A 5-digit year is plenty for any
+    // legitimate IRCv3 @time tag.
+    CString sYear = sTime.Token(0, false, "-");
+    if (sYear.length() > 5) {
+        return tv;
+    }
+    system_clock::time_point tp;
+    if (!cctz::parse("%Y-%m-%dT%H:%M:%E*SZ", sTime, cctz::utc_time_zone(),
+                     &tp)) {
+        return tv;
+    }
     microseconds usec = duration_cast<microseconds>(tp.time_since_epoch());
     tv.tv_sec = usec.count() / 1000000;
     tv.tv_usec = usec.count() % 1000000;

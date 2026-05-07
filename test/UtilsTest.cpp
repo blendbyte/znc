@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2004-2025 ZNC, see the NOTICE file for details.
+ * Copyright (C) 2004-2026 ZNC, see the NOTICE file for details.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -141,6 +141,34 @@ TEST(UtilsTest, ServerTime) {
     tzset();
 }
 
+TEST(UtilsTest, ConstantTimeEquals) {
+    // Functional correctness for the helper introduced for #2011.
+    // We can't measure timing in a unit test, so we verify the boolean
+    // contract: equal inputs match, any difference (length or content)
+    // does not.
+    EXPECT_TRUE(CUtils::ConstantTimeEquals("", ""));
+    EXPECT_TRUE(CUtils::ConstantTimeEquals("abc", "abc"));
+    EXPECT_TRUE(CUtils::ConstantTimeEquals(CString("\x00\x01\x02", 3),
+                                            CString("\x00\x01\x02", 3)));
+
+    // Differs in last byte (the hardest case for short-circuit compare).
+    EXPECT_FALSE(CUtils::ConstantTimeEquals("abc", "abd"));
+    // Differs in first byte.
+    EXPECT_FALSE(CUtils::ConstantTimeEquals("abc", "Xbc"));
+    // Length mismatch on either side.
+    EXPECT_FALSE(CUtils::ConstantTimeEquals("abc", "abcd"));
+    EXPECT_FALSE(CUtils::ConstantTimeEquals("abcd", "abc"));
+    EXPECT_FALSE(CUtils::ConstantTimeEquals("", "x"));
+    EXPECT_FALSE(CUtils::ConstantTimeEquals("x", ""));
+    // Case-sensitive (unlike CString::Equals default).
+    EXPECT_FALSE(CUtils::ConstantTimeEquals("abc", "ABC"));
+    // Embedded NUL is compared, not used as a terminator.
+    EXPECT_FALSE(CUtils::ConstantTimeEquals(CString("a\x00""c", 3),
+                                             CString("a\x00""d", 3)));
+    EXPECT_TRUE(CUtils::ConstantTimeEquals(CString("a\x00""c", 3),
+                                            CString("a\x00""c", 3)));
+}
+
 TEST(UtilsTest, ParseServerTime) {
     char* oldTZ = getenv("TZ");
     if (oldTZ) oldTZ = strdup(oldTZ);
@@ -159,6 +187,31 @@ TEST(UtilsTest, ParseServerTime) {
         unsetenv("TZ");
     }
     tzset();
+}
+
+TEST(UtilsTest, ParseServerTimeOutOfRange) {
+    // Years past 5 digits trigger int64 overflow inside cctz' microseconds
+    // conversion (`seconds * 1_000_000`). Reject up front (#2008).
+    timeval tv = CUtils::ParseServerTime("999999-01-01T00:00:00.000Z");
+    EXPECT_EQ(tv.tv_sec, 0);
+    EXPECT_EQ(tv.tv_usec, 0);
+
+    tv = CUtils::ParseServerTime("12345678-01-01T00:00:00.000Z");
+    EXPECT_EQ(tv.tv_sec, 0);
+    EXPECT_EQ(tv.tv_usec, 0);
+
+    // Junk and empty input still return a zeroed timeval.
+    tv = CUtils::ParseServerTime("");
+    EXPECT_EQ(tv.tv_sec, 0);
+    EXPECT_EQ(tv.tv_usec, 0);
+
+    tv = CUtils::ParseServerTime("not-a-date-at-all");
+    EXPECT_EQ(tv.tv_sec, 0);
+    EXPECT_EQ(tv.tv_usec, 0);
+
+    // Canonical input still parses (regression).
+    tv = CUtils::ParseServerTime("2011-10-19T16:40:51.620Z");
+    EXPECT_EQ(CUtils::FormatServerTime(tv), "2011-10-19T16:40:51.620Z");
 }
 
 class TimeTest : public testing::TestWithParam<
