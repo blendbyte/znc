@@ -692,6 +692,7 @@ bool CIRCSock::OnJoinMessage(CJoinMessage& Message) {
         if (pChan) {
             pChan->Enable();
             pChan->SetIsOn(true);
+            pChan->SetParting(false);
             PutIRC("MODE " + sChan);
         }
     } else {
@@ -727,6 +728,7 @@ bool CIRCSock::OnKickMessage(CKickMessage& Message) {
 
     if (GetNick().Equals(sKickedNick) && pChan) {
         pChan->SetIsOn(false);
+        pChan->SetParting(false);
 
         // Don't try to rejoin!
         pChan->Disable();
@@ -1108,15 +1110,38 @@ bool CIRCSock::OnNumericMessage(CNumericMessage& Message) {
 
             break;
         }
-        case 375:  // begin motd
-        case 422:  // MOTD File is missing
+        case 263:  // RPL_TRYAGAIN - RFC2812 - Rate limited.
+            if (Message.GetParam(1).Equals("MOTD")) {
+                // Set false to prevent multiple "End of /MOTD command."
+                m_bMotdBegun = false;
+            }
+            break;
+        case 375:  // RPL_MOTDSTART - Begin MOTD
+        case 422:  // ERR_NOMOTD - MOTD File is missing
             if (m_pNetwork->GetIRCServer().Equals(sServer)) {
                 m_pNetwork->ClearMotdBuffer();
+                m_bMotdBegun = true;
             }
-        case 372:  // motd
-        case 376:  // end motd
-            if (m_pNetwork->GetIRCServer().Equals(sServer)) {
+        case 372:  // RPL_MOTD - Print MOTD
+        case 376:  // RPL_ENDOFMOTD - Print "End of /MOTD command"
+            if (m_bMotdBegun && m_pNetwork->GetIRCServer().Equals(sServer)) {
                 m_pNetwork->AddMotdBuffer(BufferMessage(Message));
+            }
+            if (uRaw == 376) {
+                m_bMotdBegun = false;
+            }
+            break;
+        case 403:  // ERR_NOSUCHCHANNEL
+        case 442:  // ERR_NOTONCHANNEL
+            {
+                CString sChan = Message.GetParam(1);
+                CChan* pChan = m_pNetwork->FindChan(sChan);
+                if (pChan && pChan->IsParting()) {
+                    pChan->SetIsOn(false);
+                    pChan->SetParting(false);
+                    m_pNetwork->PutStatus(
+                        t_f("PART failed for channel {1}")(sChan));
+                }
             }
             break;
         case 437:

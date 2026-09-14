@@ -118,27 +118,88 @@ TEST_F(ZNCTest, ShellModule) {
 }
 
 TEST_F(ZNCTest, WatchModule) {
-    // TODO test other messages
     // TODO test options
     auto znc = Run();
     auto ircd = ConnectIRCd();
     auto client = LoginClient();
     client.Write("znc loadmod watch");
+    client.ReadUntil("Loaded module");
+
     client.Write("PRIVMSG *watch :add *");
     client.ReadUntil("Adding entry:");
+
+    client.Write("PRIVMSG *watch :add * *spaces *word1 word2*");
+    client.ReadUntil("Adding entry:");
+
     ircd.Write(":server 001 nick :Hello");
     ircd.Write(":nick JOIN :#znc");
+
+    // OnChanCTCPMessage / OnChanActionMessage
     ircd.Write(":n!i@h PRIVMSG #znc :\001ACTION foo\001");
     client.ReadUntil(
         ":$*!watch@znc.in PRIVMSG nick :* CTCP: n [ACTION foo] to [#znc]");
-    client.Write("PRIVMSG *watch :add * *spaces *word1 word2*");
-    client.ReadUntil("Adding entry:");
+
+    // OnChanNoticeMessage
+    ircd.Write(":n!i@h NOTICE #znc :Channel notice");
+    client.ReadUntil(":$*!watch@znc.in PRIVMSG nick :-n:#znc- Channel notice");
+
+    // OnChanTextMessage
     ircd.Write(":n!i@h PRIVMSG #znc :SOMETHING word1 word2 SOMETHING");
     client.ReadUntil(
-        ":*spaces!watch@znc.in PRIVMSG nick :<n:#znc> SOMETHING word1 word2 SOMETHING");
+        ":*spaces!watch@znc.in PRIVMSG nick :<n:#znc> SOMETHING word1 word2 "
+        "SOMETHING");
+
+    // OnPrivCTCPMessage / OnPrivActionMessage
+    ircd.Write(":n!i@h PRIVMSG nick :\001ACTION foo\001");
+    client.ReadUntil(":$*!watch@znc.in PRIVMSG nick :* CTCP: n [ACTION foo]");
+
+    // OnPrivCTCPReplyMessage
+    ircd.Write(":n!i@h NOTICE nick :\001VERSION znc 1.0\001");
+    client.ReadUntil(":$*!watch@znc.in PRIVMSG nick :* CTCP: n reply [VERSION znc 1.0]");
+
+    // OnPrivNoticeMessage
+    ircd.Write(":n!i@h NOTICE nick :Private notice");
+    client.ReadUntil(":$*!watch@znc.in PRIVMSG nick :-n- Private notice");
+
+    // OnPrivTextMessage
+    ircd.Write(":n!i@h PRIVMSG nick :Hello there");
+    client.ReadUntil(":$*!watch@znc.in PRIVMSG nick :<n> Hello there");
+
+    // OnJoinMessage
+    ircd.Write(":join!i@h JOIN :#znc");
+    client.ReadUntil(":$*!watch@znc.in PRIVMSG nick :* join (i@h) joins #znc");
+
+    // OnKickMessage
+    ircd.Write(":kick!i@h JOIN :#znc");
+    ircd.Write(":n!i@h KICK #znc kick :Test Kick");
+    client.ReadUntil(":$*!watch@znc.in PRIVMSG nick :* n kicked kick from #znc because "
+        "[Test Kick]");
+
+    // OnNickMessage
+    ircd.Write(":someone!i@h JOIN :#znc");
+    ircd.Write(":someone!i@h NICK :newname");
+    client.ReadUntil(":$*!watch@znc.in PRIVMSG nick :* someone is now known as newname");
+
+    // OnPartMessage
+    ircd.Write(":part!i@h JOIN :#znc");
+    ircd.Write(":part!i@h PART #znc :Leaving");
+    client.ReadUntil(":$*!watch@znc.in PRIVMSG nick :* part (i@h) parts #znc(Leaving)");
+
+    // OnQuitMessage
+    ircd.Write(":quit!i@h JOIN :#znc");
+    ircd.Write(":quit!i@h QUIT :Goodbye");
+    client.ReadUntil(":$*!watch@znc.in PRIVMSG nick :* Quits: quit (i@h) (Goodbye)");
+
+    // OnRawMode
+    ircd.Write(":n!i@h MODE #znc +o op");
+    client.ReadUntil(":$*!watch@znc.in PRIVMSG nick :* n sets mode: +o op on #znc");
 }
 
-TEST_F(ZNCTest, ModuleCrypt) {
+TEST_F(ZNCTest, CryptModule) {
+#ifndef HAVE_LIBSSL
+    GTEST_SKIP() << "SSL is disabled";
+#endif
+
     QFile conf(m_dir.path() + "/configs/znc.conf");
     ASSERT_TRUE(conf.open(QIODevice::Append | QIODevice::Text));
     QTextStream(&conf) << "ServerThrottle = 1\n";
@@ -184,6 +245,8 @@ TEST_F(ZNCTest, ModuleCrypt) {
     QByteArray key2("");
     client2.ReadUntilAndGet("\002user\017: ", key2);
     ASSERT_EQ(key1.mid(9), key2.mid(8));
+
+    // OnPrivTextMessage
     client1.Write("CAP REQ :echo-message");
     client1.Write("PRIVMSG .nick2 :Hello");
     QByteArray secretmsg;
@@ -191,6 +254,77 @@ TEST_F(ZNCTest, ModuleCrypt) {
     ircd2.Write(":user!user@user/test " + secretmsg);
     client2.ReadUntil("Hello");
     client1.ReadUntil(secretmsg);  // by echo-message
+
+    client1.Write("PRIVMSG *crypt :SetNickPrefix .");
+    client1.ReadUntil("Setting Nick Prefix to .");
+    client2.Write("PRIVMSG *crypt :SetNickPrefix .");
+    client2.ReadUntil("Setting Nick Prefix to .");
+
+    // OnPrivNoticeMessage
+    client1.Write("NOTICE .nick2 :secret notice");
+    QByteArray noticeMsg;
+    ircd1.ReadUntilAndGet("NOTICE nick2 :+OK ", noticeMsg);
+    ircd2.Write(":user!user@user/test " + noticeMsg);
+    QByteArray noticeLine;
+    client2.ReadUntilAndGet("NOTICE nick2 :", noticeLine);
+    QByteArray noticemessage = noticeLine.mid(noticeLine.lastIndexOf(':') + 1);
+    EXPECT_EQ(noticemessage, "secret notice");
+
+    // OnUserActionMessage
+    client1.Write("PRIVMSG .nick2 :\001ACTION waves\001");
+    QByteArray actionMsg;
+    ircd1.ReadUntilAndGet("PRIVMSG nick2 :\001ACTION +OK ", actionMsg);
+    ircd2.Write(":user!user@user/test " + actionMsg);
+    QByteArray actionLine;
+    client2.ReadUntilAndGet("PRIVMSG nick2 :", actionLine);
+    QByteArray actionMessage = actionLine.mid(actionLine.lastIndexOf(':') + 1);
+    EXPECT_EQ(actionMessage, "\001ACTION waves\001");
+
+    client1.Write("JOIN #test");
+    client2.Write("JOIN #test");
+
+    QByteArray chanKey = "channelKey123";
+    client1.Write(QByteArray("PRIVMSG *crypt :SetKey #test ") + chanKey);
+    client1.ReadUntil(QByteArray("Set encryption key for [#test] to [") +
+                      chanKey + "]");
+    client2.Write(QByteArray("PRIVMSG *crypt :SetKey #test ") + chanKey);
+    client2.ReadUntil(QByteArray("Set encryption key for [#test] to [") +
+                      chanKey + "]");
+
+    // OnChanTextMessage
+    client1.Write("PRIVMSG #test :channel secret");
+    QByteArray chanMsg;
+    ircd1.ReadUntilAndGet("PRIVMSG #test :+OK ", chanMsg);
+    ircd2.Write(":user!user@user/test " + chanMsg);
+    client2.ReadUntil("channel secret");
+
+    // OnChanNoticeMessage
+    client1.Write("NOTICE #test :chan notice");
+    QByteArray chanNoticeMsg;
+    ircd1.ReadUntilAndGet("NOTICE #test :+OK ", chanNoticeMsg);
+    ircd2.Write(":user!user@user/test " + chanNoticeMsg);
+    client2.ReadUntil("chan notice");
+
+    // OnChanActionMessage
+    client1.Write("PRIVMSG #test :\001ACTION dances\001");
+    QByteArray chanActionMsg;
+    ircd1.ReadUntilAndGet("PRIVMSG #test :\001ACTION +OK ", chanActionMsg);
+    ircd2.Write(":user!user@user/test " + chanActionMsg);
+    client2.ReadUntil("dances");
+
+    // OnUserTopicMessage / OnNumericMessage
+    client1.Write("TOPIC #test :new chan topic");
+    QByteArray chanTopicEncrypted;
+    ircd1.ReadUntilAndGet("TOPIC #test :+OK ", chanTopicEncrypted);
+    chanTopicEncrypted = "+OK " + chanTopicEncrypted.mid(
+                                      chanTopicEncrypted.lastIndexOf(' ') + 1);
+    ircd2.Write(":ircd2 332 nick2 #test :" + chanTopicEncrypted);
+    client2.ReadUntil("new chan topic");
+
+    // OnTopicMessage
+    ircd2.Write(":user!user@user/test TOPIC #test :" + chanTopicEncrypted);
+    QByteArray topicLine;
+    client2.ReadUntilAndGet("TOPIC #test :", topicLine);
 }
 
 TEST_F(ZNCTest, AutoAttachModule) {
@@ -219,6 +353,8 @@ TEST_F(ZNCTest, AutoAttachModule) {
     ircd.Write(":nick JOIN :#znc");
     ircd.Write(":server 353 nick #znc :nick");
     ircd.Write(":server 366 nick #znc :End of /NAMES list");
+
+    // OnChanTextMessage
     ircd.Write(":foo PRIVMSG #znc :hi");
     client.ReadUntil(":foo PRIVMSG");
     client.Write("detach #znc");
@@ -226,6 +362,24 @@ TEST_F(ZNCTest, AutoAttachModule) {
     ircd.Write(":foo PRIVMSG #znc :hello");
     ircd.ReadUntil("TEST");
     client.ReadUntil("hello");
+
+    // OnChanActionMessage
+    ircd.Write(":foo PRIVMSG #znc :hi");
+    client.ReadUntil(":foo PRIVMSG");
+    client.Write("detach #znc");
+    client.ReadUntil("Detached");
+    ircd.Write(":foo PRIVMSG #znc :\001ACTION hello\001");
+    ircd.ReadUntil("TEST");
+    client.ReadUntil("\001ACTION hello\001");
+
+    // OnChanNoticeMessage
+    ircd.Write(":foo NOTICE #znc :hi");
+    client.ReadUntil(":foo NOTICE");
+    client.Write("detach #znc");
+    client.ReadUntil("Detached");
+    ircd.Write(":foo NOTICE #znc :hello NOTICE");
+    ircd.ReadUntil("TEST");
+    client.ReadUntil("hello NOTICE");
 }
 
 TEST_F(ZNCTest, KeepNickModule) {
@@ -244,6 +398,31 @@ TEST_F(ZNCTest, KeepNickModule) {
     client.ReadUntil(
         ":*keepnick!keepnick@znc.in PRIVMSG user_ "
         ":Unable to obtain nick user: Nope :-P, #error");
+
+    client.Write("PRIVMSG *keepnick :state");
+    client.ReadUntil("Currently disabled");
+
+    client.Write("NICK user_");
+    ircd.ReadUntil("NICK user_");
+    client.Write("JOIN #test");
+    ircd.ReadUntil("JOIN #test");
+    ircd.Write(":server 353 nick = #test :user_ user");
+    ircd.Write(":server 366 nick #test :End of /NAMES list");
+
+    client.Write("PRIVMSG *keepnick :enable");
+    client.ReadUntil("Trying to get");
+
+    // OnQuitMessage
+    ircd.Write(":user QUIT :Leaving");
+    ircd.ReadUntil("NICK user");
+
+    // OnNickMessage
+    client.Write("NICK test");
+    ircd.ReadUntil("NICK test");
+    ircd.Write(":user!ident@host JOIN #test");
+    client.ReadUntil("JOIN");
+    ircd.Write(":user!ident@host NICK user2");
+    ircd.ReadUntil("NICK user");
 }
 
 TEST_F(ZNCTest, ModuleCSRFOverride) {
@@ -389,6 +568,10 @@ TEST_F(ZNCTest, SaslAuthPlainImapAuth) {
 }
 
 TEST_F(ZNCTest, SaslAuthExternal) {
+#ifndef HAVE_LIBSSL
+    GTEST_SKIP() << "SSL is disabled";
+#endif
+
     int port = PickPortNumber();
 
     auto znc = Run();
@@ -530,6 +713,505 @@ TEST_F(ZNCTest, StripControlsModule) {
     ircd.Write("322 nick #test 42 :\002bold\002 \003\034red\003 test");
     client.ReadUntil("322 nick #test 42 :bold red test");
 
+}
+
+TEST_F(ZNCTest, AutoReplyModule) {
+    auto znc = Run();
+    auto ircd = ConnectIRCd();
+    auto client = LoginClient();
+
+    client.Write("znc loadmod autoreply I'm currently away");
+    client.ReadUntil("Loaded module");
+
+    // Set for 1 second instead of waiting 15 seconds.
+    client.Write("PRIVMSG *simple_away :SetTimer 1");
+    client.ReadUntil("1 second");
+
+    ircd.Write(":server 001 nick :Hello");
+
+    client.Write("QUIT :Going away");
+    client.Close();
+
+    ircd.ReadUntil("AWAY :Auto away");
+    ircd.Write(":testuser!test@host PRIVMSG nick :Hello there");
+    ircd.ReadUntil("NOTICE testuser :I'm currently away");
+
+    ircd.Write(":testuser!test@host PRIVMSG nick :Another message");
+    ircd.Write(":otheruser!other@host PRIVMSG nick :Hi nick");
+    ircd.ReadUntil("NOTICE otheruser :I'm currently away");
+
+    auto client2 = LoginClient();
+    ircd.Write(":thirduser!third@host PRIVMSG nick :Are you there?");
+}
+
+TEST_F(ZNCTest, BounceDCCModule) {
+    auto znc = Run();
+    auto ircd = ConnectIRCd();
+    auto client = LoginClient();
+
+    client.Write("znc loadmod bouncedcc");
+    client.ReadUntil("Loaded module");
+
+    ircd.Write(":server 001 nick :Hello");
+
+    // OnUserCTCPMessage
+    client.Write("PRIVMSG friend :\001DCC CHAT chat 3232235521 12345\001");
+    QByteArray line;
+    ircd.ReadUntilAndGet("PRIVMSG friend :\001DCC CHAT chat", line);
+    EXPECT_THAT(line.toStdString(), Not(HasSubstr("3232235521 12345")));
+
+    // OnPrivCTCPMessage
+    ircd.Write(":friend!user@host PRIVMSG nick :\001DCC CHAT chat 3232235521 54321\001");
+    QByteArray line2;
+    client.ReadUntilAndGet(":friend!user@host PRIVMSG nick :\001DCC CHAT chat", line2);
+    EXPECT_THAT(line2.toStdString(), Not(HasSubstr("3232235521 54321")));
+}
+
+TEST_F(ZNCTest, ChanSaverModule) {
+    auto znc = Run();
+    auto ircd = ConnectIRCd();
+    auto client = LoginClient();
+
+    ircd.Write(":server 001 nick :Hello");
+    client.ReadUntil("001");
+
+    client.Write("PRIVMSG *controlpanel :GetChan InConfig $me $network #test");
+    client.ReadUntil("No channels matching [#test] found");
+
+    client.Write("JOIN #test");
+    ircd.ReadUntil("JOIN #test");
+    ircd.Write(":nick JOIN #test");
+    ircd.Write(":server 353 nick #test :nick");
+    ircd.Write(":server 366 nick #test :End of /NAMES list.");
+    client.ReadUntil(":nick JOIN #test");
+
+    client.Write("PRIVMSG *controlpanel :GetChan InConfig $me $network #test");
+    client.ReadUntil("InConfig = true");
+
+    client.Write("PART #test");
+    ircd.ReadUntil("PART #test");
+    ircd.Write(":nick PART #test");
+    client.ReadUntil(":nick PART #test");
+
+    client.Write("PRIVMSG *controlpanel :GetChan InConfig $me $network #test");
+    client.ReadUntil("No channels matching [#test] found");
+}
+
+TEST_F(ZNCTest, ClearBufferOnMsgModule) {
+    auto znc = Run();
+    auto ircd = ConnectIRCd();
+    auto client = LoginClient();
+
+    client.Write("znc loadmod clearbufferonmsg");
+    client.ReadUntil("Loaded module");
+
+    ircd.Write(":server 001 nick :Hello");
+    ircd.Write(":nick JOIN :#test");
+    ircd.Write(":server 353 nick = #test :nick someone");
+    ircd.Write(":server 366 nick #test :End of /NAMES list");
+    client.ReadUntil("End of /NAMES");
+
+    // OnUserTextMessage
+    ircd.Write(":someone!user@host PRIVMSG #test :testing - OnUserTextMessage");
+    client.ReadUntil("testing - OnUserTextMessage");
+    client.Write("PRIVMSG #test :test");
+    ircd.ReadUntil("PRIVMSG");
+    client.Write("DETACH #test");
+    client.ReadUntil("Detached");
+    client.Write("ATTACH #test");
+    client.ReadUntil("End of /NAMES list");
+    QByteArray remainder = client.ReadRemainder();
+    EXPECT_THAT(remainder, Not(HasSubstr("OnUserTextMessage")))
+        << "OnUserTextMessage failed to clear buffer";
+
+    // OnUserActionMessage
+    ircd.Write(":someone!user@host PRIVMSG #test :testing - OnUserActionMessage");
+    client.ReadUntil("testing - OnUserActionMessage");
+    client.Write("PRIVMSG #test :\001ACTION testing\001");
+    ircd.ReadUntil("PRIVMSG");
+    client.Write("DETACH #test");
+    client.ReadUntil("Detached");
+    client.Write("ATTACH #test");
+    client.ReadUntil("End of /NAMES list");
+    remainder = client.ReadRemainder();
+    EXPECT_THAT(remainder, Not(HasSubstr("OnUserActionMessage")))
+        << "OnUserActionMessage failed to clear buffer";
+
+    // OnUserCTCPMessage
+    ircd.Write(":someone!user@host PRIVMSG #test :testing - OnUserCTCPMessage");
+    client.ReadUntil("testing - OnUserCTCPMessage");
+    client.Write("PRIVMSG #test :\001VERSION\001");
+    ircd.ReadUntil("PRIVMSG");
+    client.Write("DETACH #test");
+    client.ReadUntil("Detached");
+    client.Write("ATTACH #test");
+    client.ReadUntil("End of /NAMES list");
+    remainder = client.ReadRemainder();
+    EXPECT_THAT(remainder, Not(HasSubstr("OnUserCTCPMessage")))
+        << "OnUserCTCPMessage failed to clear buffer";
+
+    // OnUserNoticeMessage
+    ircd.Write(":someone!user@host PRIVMSG #test :testing - OnUserNoticeMessage");
+    client.ReadUntil("testing - OnUserNoticeMessage");
+    client.Write("NOTICE #test :testing");
+    ircd.ReadUntil("NOTICE");
+    client.Write("DETACH #test");
+    client.ReadUntil("Detached");
+    client.Write("ATTACH #test");
+    client.ReadUntil("End of /NAMES list");
+    remainder = client.ReadRemainder();
+    EXPECT_THAT(remainder, Not(HasSubstr("OnUserNoticeMessage")))
+        << "OnUserNoticeMessage failed to clear buffer";
+
+    // OnUserPartMessage
+    ircd.Write(":someone!user@host PRIVMSG #test :testing - OnUserPartMessage");
+    client.ReadUntil("testing - OnUserPartMessage");
+    client.Write("PART #test :testing");
+    ircd.ReadUntil("PART");
+    client.Write("JOIN #test");
+    ircd.ReadUntil("JOIN");
+    ircd.Write(":server 353 nick = #test :nick someone");
+    ircd.Write(":server 366 nick #test :End of /NAMES list");
+    client.ReadUntil("End of /NAMES");
+    client.Write("DETACH #test");
+    client.ReadUntil("Detached");
+    client.Write("ATTACH #test");
+    client.ReadUntil("End of /NAMES list");
+    remainder = client.ReadRemainder();
+    EXPECT_THAT(remainder, Not(HasSubstr("OnUserPartMessage")))
+        << "OnUserPartMessage failed to clear buffer";
+
+    // OnUserTopicMessage
+    ircd.Write(":someone!user@host PRIVMSG #test :testing - OnUserTopicMessage");
+    client.ReadUntil("testing - OnUserTopicMessage");
+    client.Write("TOPIC #test :testing");
+    ircd.ReadUntil("TOPIC");
+    client.Write("DETACH #test");
+    client.ReadUntil("Detached");
+    client.Write("ATTACH #test");
+    client.ReadUntil("End of /NAMES list");
+    remainder = client.ReadRemainder();
+    EXPECT_THAT(remainder, Not(HasSubstr("OnUserTopicMessage")))
+        << "OnUserTopicMessage failed to clear buffer";
+
+    // OnUserQuitMessage
+    client.Write("znc unloadmod clearbufferonmsg");
+    client.ReadUntil("unloaded");
+
+    // quit is set as false by default
+    client.Write("znc loadmod clearbufferonmsg quit");
+    client.ReadUntil("Loaded module");
+
+    ircd.Write(":other!user@host PRIVMSG #test :buffered message");
+    client.ReadUntil("buffered message");
+    client.Write("QUIT :bye");
+    client.Close();
+
+    auto client2 = LoginClient();
+    client2.ReadUntil("001");
+    client2.Write("JOIN #test");
+    ASSERT_THAT(client2.ReadRemainder().toStdString(),
+                Not(HasSubstr("buffered message")));
+
+}
+
+TEST_F(ZNCTest, CtcpFloodModule) {
+    auto znc = Run();
+    auto ircd = ConnectIRCd();
+    auto client = LoginClient();
+
+    client.Write("znc loadmod ctcpflood");
+    client.ReadUntil("Loaded module");
+
+    ircd.Write(":server 001 nick :Hello");
+    ircd.Write(":nick JOIN :#test");
+    ircd.Write(":server 353 nick = #test :nick someone");
+    ircd.Write(":server 366 nick #test :End of /NAMES list");
+
+    // OnChanCTCPMessage
+    ircd.Write(":someone!user@host PRIVMSG #test :\001message1\001");
+    ircd.Write(":someone!user@host PRIVMSG #test :\001message2\001");
+    ircd.Write(":someone!user@host PRIVMSG #test :\001message3\001");
+    ircd.Write(":someone!user@host PRIVMSG #test :\001message4\001");
+    ircd.Write(":someone!user@host PRIVMSG #test :\001message5\001");
+    ircd.Write(":someone!user@host PRIVMSG #test :\001message6\001");
+    ircd.Write(":someone!user@host PRIVMSG #test :\001message7\001");
+    client.ReadUntil("Limit reached by");
+
+    // Unload to reset timer.
+    client.Write("znc unloadmod ctcpflood");
+    client.ReadUntil("unloaded");
+
+    client.Write("znc loadmod ctcpflood");
+    client.ReadUntil("Loaded module");
+
+    // OnPrivCTCPMessage
+    ircd.Write(":query!user@host PRIVMSG nick :\001message1\001");
+    ircd.Write(":query!user@host PRIVMSG nick :\001message2\001");
+    ircd.Write(":query!user@host PRIVMSG nick :\001message3\001");
+    ircd.Write(":query!user@host PRIVMSG nick :\001message4\001");
+    ircd.Write(":query!user@host PRIVMSG nick :\001message5\001");
+    ircd.Write(":query!user@host PRIVMSG nick :\001message6\001");
+    ircd.Write(":query!user@host PRIVMSG nick :\001message7\001");
+    client.ReadUntil("Limit reached by");
+}
+
+TEST_F(ZNCTest, FloodDetachModule) {
+    auto znc = Run();
+    auto ircd = ConnectIRCd();
+    auto client = LoginClient();
+
+    client.Write("znc loadmod flooddetach");
+    client.ReadUntil("Loaded module");
+    ircd.Write(":server 001 nick :Hello");
+
+    auto JoinChan = [&](const QString& sChan) {
+        ircd.Write((":nick JOIN :" + sChan).toUtf8());
+        ircd.Write((":server 353 nick = " + sChan + " :nick someone").toUtf8());
+        ircd.Write(
+            (":server 366 nick " + sChan + " :End of /NAMES list").toUtf8());
+        client.ReadUntil("End of /NAMES");
+    };
+    // Just use 10 for everything.
+
+    // OnChanMessage
+    JoinChan("#test-privmsg");
+    for (int i = 1; i <= 10; i++) {
+        ircd.Write((":someone!user@host PRIVMSG #test-privmsg :message" +
+                    QString::number(i))
+                       .toUtf8());
+    }
+    client.ReadUntil("Channel #test-privmsg was flooded");
+
+    // OnNickMessage
+    JoinChan("#test-nick");
+    QString sNick = "someone";
+    for (int i = 1; i <= 10; i++) {
+        QString sNewNick = "someone" + QString::number(i + 1);
+        ircd.Write((":" + sNick + "!user@host NICK " + sNewNick).toUtf8());
+        sNick = sNewNick;
+    }
+    client.ReadUntil("Channel #test-nick was flooded");
+
+    // OnTopicMessage
+    JoinChan("#test-topic");
+    for (int i = 1; i <= 10; i++) {
+        ircd.Write(
+            (":someone!user@host TOPIC #test-topic :TOPIC" + QString::number(i))
+                .toUtf8());
+    }
+    client.ReadUntil("Channel #test-topic was flooded");
+
+    // OnNoticeMessage
+    JoinChan("#test-notice");
+    for (int i = 1; i <= 10; i++) {
+        ircd.Write((":someone!user@host NOTICE #test-notice :notice" +
+                    QString::number(i))
+                       .toUtf8());
+    }
+    client.ReadUntil("Channel #test-notice was flooded");
+
+    // OnChanActionMessage / OnChanCTCPMessage
+    JoinChan("#test-ctcp");
+    for (int i = 1; i <= 10; i++) {
+        ircd.Write((":someone!user@host PRIVMSG #test-ctcp :\001"
+                    "ACTION action" +
+                    QString::number(i) + "\001")
+                       .toUtf8());
+    }
+    client.ReadUntil("Channel #test-ctcp was flooded");
+}
+
+TEST_F(ZNCTest, KickRejoinModule) {
+    auto znc = Run();
+    auto ircd = ConnectIRCd();
+    auto client = LoginClient();
+
+    client.Write("znc loadmod kickrejoin");
+    client.ReadUntil("Loaded module");
+
+    ircd.Write(":server 001 nick :Hello");
+    ircd.Write(":nick JOIN :#test");
+    ircd.Write(":server 353 nick = #test :nick @foobar");
+    ircd.Write(":server 366 nick #test :End of /NAMES list");
+
+    ircd.Write(":foobar!user@host KICK #test nick :Kicked!");
+    ircd.ReadUntil("JOIN #test");
+}
+
+TEST_F(ZNCTest, NickServModule) {
+    auto znc = Run();
+    auto ircd = ConnectIRCd();
+    auto client = LoginClient();
+
+    client.Write("znc loadmod nickserv");
+    client.ReadUntil("Loaded module");
+
+    client.Write("PRIVMSG *nickserv :set hunter2");
+    client.ReadUntil("Password set");
+
+    ircd.Write(":server 001 nick :Hello");
+
+    // OnPrivNoticeMessage
+    ircd.Write(
+        ":NickServ!services@network NOTICE nick :This nickname is registered. "
+        "Please choose a different nickname, or identify via /msg NickServ "
+        "identify <password>.");
+    ircd.ReadUntil("NICKSERV IDENTIFY hunter2");
+
+    // OnPrivTextMessage
+    ircd.Write(
+        ":NickServ!services@network PRIVMSG nick :This nickname is registered. "
+        "Please choose a different nickname, or identify via /msg NickServ "
+        "identify <password>.");
+    ircd.ReadUntil("NICKSERV IDENTIFY hunter2");
+}
+
+TEST_F(ZNCTest, StickyChanModule) {
+    auto znc = Run();
+    auto ircd = ConnectIRCd();
+    auto client = LoginClient();
+
+    client.Write("znc loadmod stickychan");
+    client.ReadUntil("Loaded module");
+
+    client.Write("PRIVMSG *stickychan :stick #sticky");
+    client.ReadUntil("Stuck #sticky");
+
+    ircd.Write("001 nick Welcome");
+    ircd.Write(":nick JOIN :#sticky");
+
+    client.ReadUntil("JOIN :#sticky");
+    client.Write("PART #sticky :leaving");
+
+    ASSERT_THAT(ircd.ReadRemainder(), Not(HasSubstr("PART")));
+
+    client.Write("PRIVMSG *controlpanel :GetChan InConfig $me $network #sticky");
+    client.ReadUntil("InConfig = true");
+}
+
+TEST_F(ZNCTest, AwayStoreModule) {
+#ifndef HAVE_LIBSSL
+    GTEST_SKIP() << "SSL is disabled";
+#endif
+    auto znc = Run();
+    auto ircd = ConnectIRCd();
+    auto client = LoginClient();
+
+    client.Write("znc loadmod awaystore testpass");
+    client.ReadUntil("Loaded module");
+
+    ircd.Write(":server 001 nick :Hello");
+    client.ReadUntil("001");
+
+    client.Write("PRIVMSG *awaystore :timer");
+    client.ReadUntil("Current timer setting");
+    client.Write("PRIVMSG *awaystore :settimer 1");
+    client.ReadUntil("Timer set to 1");
+
+    client.Write("PRIVMSG *awaystore :away Test reason");
+    client.ReadUntil("You have been marked as away");
+    ircd.ReadUntil("AWAY :Test reason");
+
+    ircd.Write(":TestUser!test@host PRIVMSG nick :Normal message");
+    client.ReadUntil(":TestUser!test@host PRIVMSG nick :Normal message");
+
+    // Test for #815 - awaystore replay does not work
+    ircd.Write(":TestUser!test@host PRIVMSG nick :AAA:BBB:CCC");
+    client.ReadUntil(":TestUser!test@host PRIVMSG nick :AAA:BBB:CCC");
+    ircd.Write(":TestUser!test@host PRIVMSG nick :\001ACTION does something\001");
+    client.ReadUntil(":TestUser!test@host PRIVMSG nick :\001ACTION does something\001");
+
+    // Test for #267 - AwayStore IPv6 parsing issue
+    ircd.Write(":IPv6!test@2001:db8:1234:5678:abcd:ef01:2345:6789 PRIVMSG nick :Normal message");
+    client.ReadUntil(":IPv6!test@2001:db8:1234:5678:abcd:ef01:2345:6789 PRIVMSG nick :Normal message");
+    ircd.Write(":IPv6!test@2001:db8:1234:5678:abcd:ef01:2345:6789 PRIVMSG nick :AAA:BBB:CCC");
+    client.ReadUntil(":IPv6!test@2001:db8:1234:5678:abcd:ef01:2345:6789 PRIVMSG nick :AAA:BBB:CCC");
+    ircd.Write(":IPv6!test@2001:db8:1234:5678:abcd:ef01:2345:6789 PRIVMSG nick :\001ACTION does something\001");
+    client.ReadUntil(":IPv6!test@2001:db8:1234:5678:abcd:ef01:2345:6789 PRIVMSG nick :\001ACTION does something\001");
+
+    client.Write("PRIVMSG *awaystore :messages");
+    client.ReadUntil("TestUser!test@host Normal message");
+    client.ReadUntil("TestUser!test@host AAA:BBB:CCC");
+    client.ReadUntil("TestUser!test@host * does something");
+
+    client.ReadUntil("IPv6!test@2001:db8:1234:5678:abcd:ef01:2345:6789 Normal message");
+    client.ReadUntil("IPv6!test@2001:db8:1234:5678:abcd:ef01:2345:6789 AAA:BBB:CCC");
+    client.ReadUntil("IPv6!test@2001:db8:1234:5678:abcd:ef01:2345:6789 * does something");
+
+    client.Write("PRIVMSG *awaystore :show");
+
+    client.ReadUntil("IPv6!test@2001:db8:1234:5678:abcd:ef01:2345:6789");
+    client.ReadUntil("Normal message");
+    client.ReadUntil("AAA:BBB:CCC");
+    client.ReadUntil("* does something");
+
+    client.ReadUntil("TestUser!test@host");
+    client.ReadUntil("Normal message");
+    client.ReadUntil("AAA:BBB:CCC");
+    client.ReadUntil("* does something");
+    client.ReadUntil("#--- End of messages");
+
+    client.Write("PRIVMSG *awaystore :delete 0");
+    client.ReadUntil("Message erased");
+
+    client.Write("PRIVMSG *awaystore :back");
+    client.ReadUntil("Welcome back!");
+    ircd.ReadUntil("away");
+
+    client.Write("PRIVMSG *awaystore :replay");
+    client.ReadUntil(":TestUser!test@host PRIVMSG nick :AAA:BBB:CCC");
+    client.ReadUntil(":TestUser!test@host PRIVMSG nick :* does something");
+
+    client.Write("PRIVMSG *awaystore :save");
+    client.ReadUntil("Messages saved to disk");
+
+    client.Write("PRIVMSG *awaystore :delete all");
+    client.ReadUntil("Deleted 5 messages");
+
+    client.Write("PRIVMSG *awaystore :save");
+    client.ReadUntil("Messages saved to disk");
+
+    client.Write("PRIVMSG *status :unloadmod awaystore");
+    client.ReadUntil("unloaded");
+
+    // Begin 'pass' bug not using CBlowfish::MD5()
+    client.Write("znc loadmod awaystore testpass");
+    client.ReadUntil("Loaded module");
+
+    client.Write("PRIVMSG *awaystore :away Not here");
+    client.ReadUntil("You have been marked as away");
+    ircd.Write(":TestUser!test@host PRIVMSG nick :should survive");
+    client.ReadUntil(":TestUser!test@host PRIVMSG nick :should survive");
+
+    client.Write("PRIVMSG *awaystore :pass newpass");
+    client.ReadUntil("Password updated to [newpass]");
+
+    client.Write("PRIVMSG *awaystore :save");
+    client.ReadUntil("Messages saved to disk");
+
+    client.Write("znc unloadmod awaystore");
+    client.ReadUntil("unloaded");
+
+    client.Write("znc loadmod awaystore newpass");
+    client.ReadUntil("Loaded module");
+
+    client.Write("znc unloadmod awaystore");
+    client.ReadUntil("unloaded");
+    // End 'pass' bug test
+
+    // Begin 'away' not updating bug test
+    client.Write("znc loadmod awaystore newpass");
+    client.ReadUntil("Loaded module");
+
+    client.Write("PRIVMSG *awaystore :away first reason");
+    client.ReadUntil("You have been marked as away");
+    ircd.ReadUntil("AWAY :first reason");
+
+    client.Write("PRIVMSG *awaystore :away second reason");
+    client.ReadUntil("You have been marked as away");
+    ircd.ReadUntil("AWAY :second reason");
+    // End 'away' bug test
 }
 
 }  // namespace
